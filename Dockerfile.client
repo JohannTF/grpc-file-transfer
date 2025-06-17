@@ -30,5 +30,5 @@ COPY client.py .
 # Configurar PYTHONPATH
 ENV PYTHONPATH="/app/src/generated:/app/src:/app"
 
-# Comando por defecto (se puede sobrescribir)
-CMD ["python", "client.py", "--host", "server", "--output", "downloaded_file.dat"]
+# Comando por defecto
+CMD ["sh", "-c", "python client.py --host server --output downloaded_file.dat && echo 'Container will stay alive for inspection.' && sleep infinity"]

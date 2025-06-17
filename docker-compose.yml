@@ -13,6 +13,12 @@ services:
       - rcp-network
     volumes:
       - ./data:/app/data:ro  # Montar directorio data como read-only
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(1); result=s.connect_ex(('localhost',50051)); s.close(); exit(result)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
     container_name: rcp-server
 
   # Cliente 1
@@ -21,10 +27,11 @@ services:
       context: .
       dockerfile: Dockerfile.client
     depends_on:
-      - server
+      server:
+        condition: service_healthy
     networks:
       - rcp-network
-    command: ["python", "client.py", "--host", "server", "--client-id", "client_1", "--output", "download_1.dat", "--concurrent", "5"]
+    command: ["sh", "-c", "python client.py --host server --client-id client_1 --output download_1.dat --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
     container_name: rcp-client-1
 
   # Cliente 2
@@ -33,10 +40,11 @@ services:
       context: .
       dockerfile: Dockerfile.client
     depends_on:
-      - server
+      server:
+        condition: service_healthy
     networks:
       - rcp-network
-    command: ["python", "client.py", "--host", "server", "--client-id", "client_2", "--output", "download_2.dat", "--concurrent", "5"]
+    command: ["sh", "-c", "python client.py --host server --client-id client_2 --output download_2.dat --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
     container_name: rcp-client-2
 
   # Cliente 3
@@ -45,11 +53,11 @@ services:
       context: .
       dockerfile: Dockerfile.client
     depends_on:
-      - server
+      server:
+        condition: service_healthy
     networks:
       - rcp-network
-    
-    command: ["python", "client.py", "--host", "server", "--client-id", "client_3", "--output", "download_3.dat", "--concurrent", "5"]
+    command: ["sh", "-c", "python client.py --host server --client-id client_3 --output download_3.dat --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
     container_name: rcp-client-3
 
   # Cliente 4
@@ -58,10 +66,11 @@ services:
       context: .
       dockerfile: Dockerfile.client
     depends_on:
-      - server
+      server:
+        condition: service_healthy
     networks:
       - rcp-network
-    command: ["python", "client.py", "--host", "server", "--client-id", "client_4", "--output", "download_4.dat", "--concurrent", "5"]
+    command: ["sh", "-c", "python client.py --host server --client-id client_4 --output download_4.dat --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
     container_name: rcp-client-4
 
   # Cliente 5
@@ -70,10 +79,11 @@ services:
       context: .
       dockerfile: Dockerfile.client
     depends_on:
-      - server
+      server:
+        condition: service_healthy
     networks:
       - rcp-network
-    command: ["python", "client.py", "--host", "server", "--client-id", "client_5", "--output", "download_5.dat", "--concurrent", "5"]
+    command: ["sh", "-c", "python client.py --host server --client-id client_5 --output download_5.dat --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
     container_name: rcp-client-5
 
 networks:
