@@ -1,0 +1,81 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # Servidor RPC
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "50051:50051"
+    networks:
+      - rcp-network
+    volumes:
+      - ./data:/app/data:ro  # Montar directorio data como read-only
+    container_name: rcp-server
+
+  # Cliente 1
+  client1:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    depends_on:
+      - server
+    networks:
+      - rcp-network
+    command: ["python", "client.py", "--host", "server", "--client-id", "client_1", "--output", "download_1.dat", "--concurrent", "5"]
+    container_name: rcp-client-1
+
+  # Cliente 2
+  client2:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    depends_on:
+      - server
+    networks:
+      - rcp-network
+    command: ["python", "client.py", "--host", "server", "--client-id", "client_2", "--output", "download_2.dat", "--concurrent", "5"]
+    container_name: rcp-client-2
+
+  # Cliente 3
+  client3:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    depends_on:
+      - server
+    networks:
+      - rcp-network
+    
+    command: ["python", "client.py", "--host", "server", "--client-id", "client_3", "--output", "download_3.dat", "--concurrent", "5"]
+    container_name: rcp-client-3
+
+  # Cliente 4
+  client4:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    depends_on:
+      - server
+    networks:
+      - rcp-network
+    command: ["python", "client.py", "--host", "server", "--client-id", "client_4", "--output", "download_4.dat", "--concurrent", "5"]
+    container_name: rcp-client-4
+
+  # Cliente 5
+  client5:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    depends_on:
+      - server
+    networks:
+      - rcp-network
+    command: ["python", "client.py", "--host", "server", "--client-id", "client_5", "--output", "download_5.dat", "--concurrent", "5"]
+    container_name: rcp-client-5
+
+networks:
+  rcp-network:
+    driver: bridge

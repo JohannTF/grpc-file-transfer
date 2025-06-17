@@ -1,0 +1,34 @@
+# Dockerfile.client
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copiar archivos de configuración
+COPY requirements.txt .
+COPY protos/ ./protos/
+
+# Instalar dependencias
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Crear directorios
+RUN mkdir -p downloads src/generated
+
+# Generar código gRPC
+RUN python -m grpc_tools.protoc \
+    --proto_path=protos \
+    --python_out=src/generated \
+    --grpc_python_out=src/generated \
+    protos/file_transfer.proto
+
+# Crear __init__.py
+RUN touch src/generated/__init__.py
+
+# Copiar código fuente
+COPY src/ ./src/
+COPY client.py .
+
+# Configurar PYTHONPATH
+ENV PYTHONPATH="/app/src/generated:/app/src:/app"
+
+# Comando por defecto (se puede sobrescribir)
+CMD ["python", "client.py", "--host", "server", "--output", "downloaded_file.dat"]
