@@ -1,6 +1,6 @@
 """
-Servidor gRPC  para RPC
-Implementación, solo acceso directo a chunks
+Servidor gRPC optimizado para archivos grandes
+Implementación con lectura bajo demanda y caché LRU
 """
 
 import asyncio
@@ -9,9 +9,9 @@ import grpc
 from grpc import aio
 from typing import Dict, Optional
 import structlog
+from collections import defaultdict
 
-from .chunk_controller import PrecomputedChunkController
-
+from .chunk_controller import PrecomputedChunkController, ChunkInfo, FileInfo
 
 # Logger estructurado
 logger = structlog.get_logger()
@@ -19,13 +19,10 @@ logger = structlog.get_logger()
 
 class FileTransferServiceImpl:
     """
-    Implementación simplificada del servicio de transferencia.
-    
-    Características:
-    - Acceso directo a chunks pre-computados
-    - Sin locks (arrays inmutables)
-    - Latencia consistente <2ms por chunk
-    - Soporte para 100+ clientes concurrentes
+    Implementación optimizada del servicio de transferencia:
+    - Soporte para archivos grandes con lectura bajo demanda
+    - Gestión eficiente de memoria con caché LRU
+    - Estadísticas detalladas de rendimiento
     """
     
     def __init__(self, chunk_controller: PrecomputedChunkController):
@@ -33,27 +30,22 @@ class FileTransferServiceImpl:
         Inicializa el servicio.
         
         Args:
-            chunk_controller: Controlador de chunks pre-computados
+            chunk_controller: Controlador de chunks optimizado
         """
         self.chunk_controller = chunk_controller
         self.active_clients: Dict[str, Dict] = {}
         self.start_time = time.time()
+        self.stats_lock = asyncio.Lock()
     
     async def GetFileInfo(self, request, context):
         """
         Obtiene información del archivo disponible.
-        
-        Args:
-            request: FileInfoRequest
-            context: Context de gRPC
-            
-        Returns:
-            FileInfoResponse con información del archivo
         """
         client_id = request.client_id or f"client_{int(time.time())}"
         
         # Registrar cliente activo
-        self._register_active_client(client_id)
+        async with self.stats_lock:
+            self._register_active_client(client_id)
         
         file_info = self.chunk_controller.get_file_info()
         
@@ -61,7 +53,6 @@ class FileTransferServiceImpl:
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details("Archivo no disponible. Servidor no inicializado.")
             
-            # Crear response vacía pero válida
             from generated import file_transfer_pb2
             return file_transfer_pb2.FileInfoResponse(file_ready=False)
         
@@ -81,18 +72,10 @@ class FileTransferServiceImpl:
     
     async def GetChunk(self, request, context):
         """
-        Obtiene un chunk específico por ID.
-        
-        Args:
-            request: ChunkRequest
-            context: Context de gRPC
-            
-        Returns:
-            ChunkResponse con datos del chunk
+        Obtiene un chunk específico por ID con lectura bajo demanda.
         """
         client_id = request.client_id
         chunk_id = request.chunk_id
-        
         start_time = time.time()
         
         # Validar request
@@ -107,8 +90,10 @@ class FileTransferServiceImpl:
                 error_message="chunk_id debe ser >= 0"
             )
         
-        # Obtener chunk (acceso directo O(1))
-        chunk_info = self.chunk_controller.get_chunk(chunk_id, client_id)
+        # Obtener chunk (lectura bajo demanda)
+        chunk_info: Optional[ChunkInfo] = await self.chunk_controller.get_chunk(
+            chunk_id, client_id
+        )
         
         if not chunk_info:
             # Chunk no encontrado
@@ -118,7 +103,6 @@ class FileTransferServiceImpl:
                 success=False,
                 error_message=f"Chunk {chunk_id} no encontrado o fuera de rango"
             )
-            
             return response
         
         # Crear response exitosa
@@ -137,20 +121,14 @@ class FileTransferServiceImpl:
         latency_ms = (time.time() - start_time) * 1000
         
         # Actualizar estadísticas de cliente
-        self._update_client_stats(client_id, chunk_info.size, latency_ms)
+        async with self.stats_lock:
+            self._update_client_stats(client_id, chunk_info.size, latency_ms)
         
         return response
     
     async def RegisterClient(self, request, context):
         """
         Registra un cliente para estadísticas.
-        
-        Args:
-            request: ClientRegisterRequest
-            context: Context de gRPC
-            
-        Returns:
-            ClientRegisterResponse
         """
         client_id = request.client_id
         client_info = request.client_info
@@ -159,26 +137,21 @@ class FileTransferServiceImpl:
         session_id = f"session_{client_id}_{int(time.time())}"
         
         # Registrar cliente
-        self._register_active_client(client_id, client_info)
+        async with self.stats_lock:
+            self._register_active_client(client_id, client_info)
+        
         from generated import file_transfer_pb2
         response = file_transfer_pb2.ClientRegisterResponse(
             accepted=True,
             session_id=session_id,
-            server_info="RPC Server v1.0 - Pre-computed chunks"
+            server_info="RPC Server v2.0 - On-demand chunks"
         )
         
         return response
     
     async def GetServerStats(self, request, context):
         """
-        Obtiene estadísticas del servidor.
-        
-        Args:
-            request: ServerStatsRequest
-            context: Context de gRPC
-            
-        Returns:
-            ServerStatsResponse
+        Obtiene estadísticas detalladas del servidor.
         """
         detailed = request.detailed
         
@@ -187,19 +160,21 @@ class FileTransferServiceImpl:
         
         # Calcular estadísticas del servidor
         uptime = time.time() - self.start_time
-        active_clients = len(self.active_clients)
         
         from generated import file_transfer_pb2
         response = file_transfer_pb2.ServerStatsResponse(
-            active_clients=active_clients,
+            active_clients=len(self.active_clients),
             total_bytes_sent=sum(
                 client["bytes_sent"] for client in self.active_clients.values()
             ),
             total_chunks_sent=controller_stats["total_requests"],
-            avg_chunks_per_second=controller_stats["chunks_per_second"],
+            avg_chunks_per_second=controller_stats["requests_per_second"],
             server_uptime_seconds=uptime,
-            cache_hits=0,  # No hay cache, siempre hit
-            cache_misses=0  # No hay cache misses
+            cache_hits=controller_stats["cache_hits"],
+            cache_misses=controller_stats["cache_misses"],
+            cache_efficiency=controller_stats["cache_efficiency"],
+            cache_size=controller_stats["cache_size"],
+            concurrent_reads=controller_stats["concurrent_reads"]
         )
         
         # Agregar estadísticas detalladas si se solicita
@@ -210,7 +185,8 @@ class FileTransferServiceImpl:
                     chunks_requested=stats["chunks_requested"],
                     bytes_transferred=stats["bytes_sent"],
                     avg_latency_ms=stats["avg_latency_ms"],
-                    status=stats["status"]
+                    status=stats["status"],
+                    last_activity=stats["last_activity"]
                 )
                 response.client_stats.append(client_stat)
         
@@ -245,7 +221,7 @@ class FileTransferServiceImpl:
         stats["avg_latency_ms"] = stats["total_latency"] / stats["chunks_requested"]
     
     def cleanup_inactive_clients(self, max_idle_seconds: int = 300):
-        """Limpia clientes inactivos (llamar periódicamente)."""
+        """Limpia clientes inactivos."""
         current_time = time.time()
         inactive_clients = []
         
@@ -260,15 +236,7 @@ class FileTransferServiceImpl:
 
 async def create_server(host: str, port: int, chunk_controller: PrecomputedChunkController):
     """
-    Crea y configura el servidor gRPC.
-    
-    Args:
-        host: Host para bind
-        port: Puerto para bind
-        chunk_controller: Controlador de chunks
-        
-    Returns:
-        Servidor gRPC configurado
+    Crea y configura el servidor gRPC optimizado.
     """
     # Importar generated code
     try:
@@ -277,18 +245,16 @@ async def create_server(host: str, port: int, chunk_controller: PrecomputedChunk
         logger.error("Generated gRPC code not found. Run: python generate_grpc.py")
         raise
     
-    # Crear servidor con configuración optimizada
+    # Crear servidor con configuración para grandes archivos
     server = aio.server(
         options=[
-            ('grpc.keepalive_time_ms', 30000),
-            ('grpc.keepalive_timeout_ms', 5000),
-            ('grpc.keepalive_permit_without_calls', True),
-            ('grpc.http2.max_pings_without_data', 0),
-            ('grpc.http2.min_time_between_pings_ms', 10000),
-            ('grpc.http2.min_ping_interval_without_data_ms', 300000),
-            ('grpc.max_concurrent_streams', 1000),
-            ('grpc.max_receive_message_length', 64 * 1024 * 1024),  # 64MB
-            ('grpc.max_send_message_length', 64 * 1024 * 1024),     # 64MB
+            ('grpc.keepalive_time_ms', 30000),          # Ping cada 30s
+            ('grpc.keepalive_timeout_ms', 10000),        # Timeout 10s
+            ('grpc.http2.max_pings_without_data', 0),    # Permitir pings sin datos
+            ('grpc.max_concurrent_streams', 1000),       # Mayor concurrencia
+            ('grpc.max_receive_message_length', -1),     # Sin límite para recepción
+            ('grpc.max_send_message_length', -1),        # Sin límite para envío
+            ('grpc.http2.write_buffer_size', 16 * 1024 * 1024),  # 16MB buffer
         ]
     )
     
@@ -302,23 +268,39 @@ async def create_server(host: str, port: int, chunk_controller: PrecomputedChunk
     listen_addr = f"{host}:{port}"
     server.add_insecure_port(listen_addr)
     
-    logger.info("server_configured", host=host, port=port)
+    logger.info("server_configured", 
+                host=host, 
+                port=port,
+                chunk_size=chunk_controller.chunk_size,
+                max_cache=chunk_controller.max_cache_size,
+                max_reads=chunk_controller.max_concurrent_reads)
     
     return server, service_impl
 
 
 async def cleanup_task(service_impl: FileTransferServiceImpl):
-    """Tarea periódica para limpiar clientes inactivos."""
+    """Tarea periódica para mantenimiento y estadísticas."""
     while True:
-        await asyncio.sleep(60)  # Cada minuto
+        await asyncio.sleep(60)  # Ejecutar cada minuto
+        
+        # Limpiar clientes inactivos
         service_impl.cleanup_inactive_clients()
         
-        # Log estadísticas periódicas
+        # Obtener estadísticas
         stats = service_impl.chunk_controller.get_server_stats()
+        
+        # Calcular uso de recursos
+        active_clients = len(service_impl.active_clients)
+        cache_efficiency = stats["cache_efficiency"]
+        req_per_sec = stats["requests_per_second"]
+        
+        # Log estadísticas periódicas
         logger.info(
-            "periodic_stats",
-            active_clients=len(service_impl.active_clients),
+            "server_stats",
+            active_clients=active_clients,
             total_requests=stats["total_requests"],
-            chunks_per_second=f"{stats['chunks_per_second']:.1f}",
-            memory_usage_mb=f"{stats['memory_usage_mb']:.1f}"
+            req_per_sec=f"{req_per_sec:.1f}",
+            cache_efficiency=cache_efficiency,
+            cache_size=stats["cache_size"],
+            concurrent_reads=stats["concurrent_reads"]
         )

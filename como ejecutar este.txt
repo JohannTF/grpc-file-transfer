@@ -1,0 +1,2 @@
+python server.py data/mi_video.mp4 --host 0.0.0.0 --port 50051 --chunk-size 8388608
+python client.py --host 192.168.1.100 --port 50051 --workers 15 --output C:\descargas

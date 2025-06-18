@@ -1,21 +1,23 @@
 """
-Controlador de chunks pre-computados para RPC
-Arquitectura simplificada sin productor-consumidor
+Controlador de chunks optimizado para archivos grandes
+Lectura bajo demanda con caché LRU y control de concurrencia
 """
 
+import os
+import asyncio
 import hashlib
 import time
-import multiprocessing
 from pathlib import Path
 from dataclasses import dataclass
-from typing import List, Optional, Dict
-from concurrent.futures import ProcessPoolExecutor
-import psutil
+from typing import Optional, Dict, List
+from collections import OrderedDict
+import logging
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ChunkInfo:
-    """Información de un chunk pre-computado."""
+    """Información de un chunk."""
     chunk_id: int
     data: bytes
     checksum: str
@@ -23,185 +25,127 @@ class ChunkInfo:
     offset: int
     is_last: bool
 
-
 @dataclass
 class FileInfo:
-    """Información del archivo pre-computado."""
+    """Información del archivo."""
     filename: str
-    filepath: Path
     file_size: int
     total_chunks: int
     chunk_size: int
     file_checksum: str
     file_type: str = "application/octet-stream"
 
-
 class PrecomputedChunkController:
     """
-    Controlador  que pre-computa todos los chunks en memoria.
-    
-    Ventajas:
-    - Acceso O(1) a cualquier chunk
-    - Sin locks (arrays inmutables)
-    - Latencia consistente <2ms
-    - Eliminación de I/O durante operación
+    Controlador optimizado para archivos grandes:
+    - Lectura bajo demanda con os.pread
+    - Caché LRU para chunks frecuentes
+    - Control de concurrencia con semáforos
+    - Sin precarga de archivos completos
     """
     
-    def __init__(self, chunk_size: int = 4 * 1024 * 1024):
+    def __init__(
+        self,
+        chunk_size: int = 4 * 1024 * 1024,
+        max_cache_size: int = 50,
+        max_concurrent_reads: int = 20
+    ):
         """
         Inicializa el controlador.
         
         Args:
-            chunk_size: Tamaño de cada chunk en bytes (default: 4MB)
+            chunk_size: Tamaño de chunk en bytes
+            max_cache_size: Máximo chunks en caché
+            max_concurrent_reads: Máximo lecturas concurrentes
         """
         self.chunk_size = chunk_size
+        self.max_cache_size = max_cache_size
+        self.max_concurrent_reads = max_concurrent_reads
         
-        # Arrays inmutables (sin locks necesarios)
-        self.chunks: List[bytes] = []
-        self.checksums: List[str] = []
-        
-        # Información del archivo
-        self.file_info: Optional[FileInfo] = None
+        # Estado del controlador
         self.precomputed: bool = False
+        self.file_info: Optional[FileInfo] = None
+        self.fd: Optional[int] = None  # File descriptor
+        
+        # Caché LRU para chunks
+        self.cache: OrderedDict[int, ChunkInfo] = OrderedDict()
+        self.cache_lock = asyncio.Lock()
+        
+        # Control de concurrencia
+        self.read_semaphore = asyncio.Semaphore(max_concurrent_reads)
         
         # Estadísticas
         self.total_requests: int = 0
         self.start_time: float = time.time()
         self.client_stats: Dict[str, Dict] = {}
+        self.cache_hits: int = 0
+        self.cache_misses: int = 0
     
     async def precompute_file(self, file_path: str) -> FileInfo:
         """
-        Pre-computa todo el archivo dividido en chunks.
+        Precomputa metadatos del archivo SIN cargarlo en memoria.
         
         Args:
             file_path: Ruta al archivo
             
         Returns:
-            Información del archivo pre-computado
-            
-        Raises:
-            FileNotFoundError: Si el archivo no existe
-            MemoryError: Si no hay suficiente memoria
+            FileInfo con metadatos
         """
-        file_path = Path(file_path)
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Archivo no encontrado: {file_path}")
-        
-        file_size = file_path.stat().st_size
-        total_chunks = (file_size + self.chunk_size - 1) // self.chunk_size
-        
-        print(f"[INIT] Loading file: {file_path.name} ({file_size:,} bytes, {total_chunks} chunks)")
-        
-        # Verificar memoria disponible
-        available_memory = psutil.virtual_memory().available
-        required_memory = file_size + (total_chunks * 100)  # +overhead
-        
-        if required_memory > available_memory * 0.8:
-            raise MemoryError(
-                f"Insufficient memory. Required: {required_memory:,}, Available: {available_memory:,}"
+        try:
+            path = Path(file_path)
+            self.fd = os.open(file_path, os.O_RDONLY)
+            
+            # Obtener metadatos del archivo
+            file_size = os.fstat(self.fd).st_size
+            total_chunks = (file_size + self.chunk_size - 1) // self.chunk_size
+            
+            # Calcular checksum en segundo plano (opcional)
+            file_checksum = "not_computed"
+            
+            self.file_info = FileInfo(
+                filename=path.name,
+                file_size=file_size,
+                total_chunks=total_chunks,
+                chunk_size=self.chunk_size,
+                file_checksum=file_checksum,
+                file_type=self._detect_file_type(path)
             )
-        
-        # Decidir estrategia de pre-cómputo
-        num_cores = multiprocessing.cpu_count()
-        if file_size > 100 * 1024 * 1024 and num_cores > 2:  # >100MB y múltiples cores
-            print(f"[INIT] Using parallel precomputation with {num_cores} cores")
-            await self._precompute_parallel(file_path, file_size, total_chunks)
-        else:
-            print("[INIT] Using sequential precomputation")
-            await self._precompute_sequential(file_path, file_size, total_chunks)
-        
-        # Calcular checksum del archivo completo
-        file_checksum = await self._calculate_file_checksum(file_path)
-        
-        # Crear información del archivo
-        self.file_info = FileInfo(
-            filename=file_path.name,
-            filepath=file_path,
-            file_size=file_size,
-            total_chunks=total_chunks,
-            chunk_size=self.chunk_size,
-            file_checksum=file_checksum,
-            file_type=self._detect_file_type(file_path)
-        )
-        
-        self.precomputed = True
-        
-        print(f"[INIT] Precomputation completed - Memory: {required_memory / 1024 / 1024:.1f} MB")
-        
-        return self.file_info
-    
-    async def _precompute_sequential(self, file_path: Path, file_size: int, total_chunks: int):
-        """Pre-cómputo secuencial."""
-        start_time = time.time()
-        
-        with open(file_path, 'rb') as f:
-            for chunk_id in range(total_chunks):
-                data = f.read(self.chunk_size)
-                if not data:
-                    break
-                
-                checksum = hashlib.md5(data).hexdigest()
-                
-                self.chunks.append(data)
-                self.checksums.append(checksum)
-                
-                # # Progress cada 50 chunks (con chunks de 4MB)
-                # if (chunk_id + 1) % 50 == 0 or chunk_id == total_chunks - 1:
-                #     progress = (chunk_id + 1) / total_chunks * 100
-                #     print(f"[PRECOMP] Progress: {progress:.0f}% ({chunk_id + 1}/{total_chunks})")
-    
-    async def _precompute_parallel(self, file_path: Path, file_size: int, total_chunks: int):
-        """Pre-cómputo paralelo usando múltiples procesos."""
-        start_time = time.time()
-        num_cores = multiprocessing.cpu_count()
-        
-        # Dividir trabajo entre procesos
-        chunks_per_process = total_chunks // num_cores
-        tasks = []
-        
-        for process_id in range(num_cores):
-            start_chunk = process_id * chunks_per_process
-            end_chunk = start_chunk + chunks_per_process
             
-            if process_id == num_cores - 1:  # Último proceso toma chunks restantes
-                end_chunk = total_chunks
+            self.precomputed = True
+            logger.info(
+                f"Archivo listo: {self.file_info.filename} "
+                f"({file_size:,} bytes, {total_chunks} chunks)"
+            )
             
-            tasks.append((str(file_path), start_chunk, end_chunk, self.chunk_size))
-        
-         # Ejecutar en paralelo
-        with ProcessPoolExecutor(max_workers=num_cores) as executor:
-            print(f"[PRECOMP] Processing {len(tasks)} segments in parallel")
+            return self.file_info
             
-            results = list(executor.map(_process_file_segment, tasks))
-        
-        # Combinar resultados en orden
-        self.chunks = [None] * total_chunks
-        self.checksums = [None] * total_chunks
-        
-        for segment_results in results:
-            for chunk_id, data, checksum in segment_results:
-                self.chunks[chunk_id] = data
-                self.checksums[chunk_id] = checksum
-        
-        elapsed = time.time() - start_time
-        print(f"[PRECOMP] Parallel processing completed in {elapsed:.2f}s")
+        except Exception as e:
+            logger.error(f"Error en precomputación: {e}")
+            self.close()
+            raise
     
-    def get_chunk(self, chunk_id: int, client_id: str = "unknown") -> Optional[ChunkInfo]:
+    def close(self):
+        """Libera recursos del archivo."""
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+    
+    async def get_chunk(self, chunk_id: int, client_id: str = "unknown") -> Optional[ChunkInfo]:
         """
-        Obtiene un chunk específico por ID.
+        Obtiene un chunk con gestión eficiente de recursos.
         
         Args:
             chunk_id: ID del chunk (0-based)
-            client_id: ID del cliente para estadísticas
+            client_id: ID para estadísticas
             
         Returns:
-            Información del chunk o None si no es válido
+            ChunkInfo o None si es inválido
         """
-        if not self.precomputed:
+        if not self.precomputed or self.fd is None:
             return None
         
-        if chunk_id < 0 or chunk_id >= len(self.chunks):
+        # Validar ID de chunk
+        if chunk_id < 0 or chunk_id >= self.file_info.total_chunks:
             return None
         
         # Actualizar estadísticas
@@ -215,65 +159,85 @@ class PrecomputedChunkController:
         
         stats = self.client_stats[client_id]
         stats["requests"] += 1
-        stats["bytes_sent"] += len(self.chunks[chunk_id])
-        stats["last_request"] = time.time()
         
-        # Acceso directo O(1) - SIN LOCKS
-        return ChunkInfo(
-            chunk_id=chunk_id,
-            data=self.chunks[chunk_id],
-            checksum=self.checksums[chunk_id],
-            size=len(self.chunks[chunk_id]),
-            offset=chunk_id * self.chunk_size,
-            is_last=(chunk_id == len(self.chunks) - 1)
-        )
+        # Intentar obtener del caché
+        async with self.cache_lock:
+            if chunk_id in self.cache:
+                chunk_info = self.cache[chunk_id]
+                self.cache.move_to_end(chunk_id)  # Actualizar LRU
+                self.cache_hits += 1
+                stats["bytes_sent"] += len(chunk_info.data)
+                return chunk_info
+        
+        # Leer desde disco si no está en caché
+        self.cache_misses += 1
+        chunk_info = await self._read_chunk_from_disk(chunk_id)
+        
+        if chunk_info:
+            # Actualizar caché
+            async with self.cache_lock:
+                self.cache[chunk_id] = chunk_info
+                if len(self.cache) > self.max_cache_size:
+                    self.cache.popitem(last=False)  # Eliminar LRU
+            
+            stats["bytes_sent"] += len(chunk_info.data)
+        
+        return chunk_info
+    
+    async def _read_chunk_from_disk(self, chunk_id: int) -> Optional[ChunkInfo]:
+        """Lee un chunk directamente del disco."""
+        start = chunk_id * self.chunk_size
+        end = min(start + self.chunk_size, self.file_info.file_size)
+        length = end - start
+        
+        # Control de concurrencia para evitar sobrecarga
+        async with self.read_semaphore:
+            try:
+                # Lectura atómica con pread (no afecta offset)
+                data = await asyncio.to_thread(
+                    os.pread, self.fd, length, start
+                )
+                
+                checksum = hashlib.md5(data).hexdigest()
+                
+                return ChunkInfo(
+                    chunk_id=chunk_id,
+                    data=data,
+                    checksum=checksum,
+                    size=len(data),
+                    offset=start,
+                    is_last=(chunk_id == self.file_info.total_chunks - 1)
+                )
+            except Exception as e:
+                logger.error(f"Error leyendo chunk {chunk_id}: {e}")
+                return None
     
     def get_file_info(self) -> Optional[FileInfo]:
-        """Retorna información del archivo pre-computado."""
         return self.file_info if self.precomputed else None
     
     def get_server_stats(self) -> Dict:
-        """Retorna estadísticas del servidor."""
+        """Estadísticas del servidor."""
         uptime = time.time() - self.start_time
+        cache_size = len(self.cache)
+        cache_efficiency = self.cache_hits / (self.cache_hits + self.cache_misses) * 100 if (self.cache_hits + self.cache_misses) > 0 else 0
         
         return {
             "precomputed": self.precomputed,
-            "total_chunks": len(self.chunks) if self.precomputed else 0,
+            "total_chunks": self.file_info.total_chunks if self.precomputed else 0,
             "total_requests": self.total_requests,
             "active_clients": len(self.client_stats),
             "uptime_seconds": uptime,
-            "chunks_per_second": self.total_requests / uptime if uptime > 0 else 0,
-            "memory_usage_mb": self._calculate_memory_usage(),
-            "client_stats": dict(self.client_stats)
+            "requests_per_second": self.total_requests / uptime if uptime > 0 else 0,
+            "cache_size": cache_size,
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "cache_efficiency": f"{cache_efficiency:.1f}%",
+            "concurrent_reads": self.max_concurrent_reads
         }
     
-    def _calculate_memory_usage(self) -> float:
-        """Calcula el uso de memoria en MB."""
-        if not self.precomputed:
-            return 0.0
-        
-        chunks_memory = sum(len(chunk) for chunk in self.chunks)
-        checksums_memory = sum(len(checksum.encode()) for checksum in self.checksums)
-        
-        return (chunks_memory + checksums_memory) / 1024 / 1024
-    
-    async def _calculate_file_checksum(self, file_path: Path) -> str:
-        """Calcula el checksum SHA-256 del archivo completo."""
-        hash_sha256 = hashlib.sha256()
-        
-        with open(file_path, 'rb') as f:
-            while True:
-                chunk = f.read(8192)
-                if not chunk:
-                    break
-                hash_sha256.update(chunk)
-        
-        return hash_sha256.hexdigest()
-    
     def _detect_file_type(self, file_path: Path) -> str:
-        """Detecta el tipo de archivo basado en la extensión."""
+        """Detecta tipo MIME por extensión."""
         extension = file_path.suffix.lower()
-        
         type_map = {
             '.mp4': 'video/mp4',
             '.avi': 'video/avi',
@@ -285,32 +249,4 @@ class PrecomputedChunkController:
             '.zip': 'application/zip',
             '.exe': 'application/octet-stream'
         }
-        
         return type_map.get(extension, 'application/octet-stream')
-
-
-def _process_file_segment(args):
-    """
-    Función para procesar un segmento del archivo en proceso separado.
-    
-    Args:
-        args: Tupla (file_path, start_chunk, end_chunk, chunk_size)
-        
-    Returns:
-        Lista de tuplas (chunk_id, data, checksum)
-    """
-    file_path, start_chunk, end_chunk, chunk_size = args
-    results = []
-    
-    with open(file_path, 'rb') as f:
-        f.seek(start_chunk * chunk_size)
-        
-        for chunk_id in range(start_chunk, end_chunk):
-            data = f.read(chunk_size)
-            if not data:
-                break
-            
-            checksum = hashlib.md5(data).hexdigest()
-            results.append((chunk_id, data, checksum))
-    
-    return results

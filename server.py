@@ -9,6 +9,8 @@ import argparse
 from pathlib import Path
 import logging
 
+
+
 # Configurar logging simple
 logging.basicConfig(
     level=logging.INFO,
