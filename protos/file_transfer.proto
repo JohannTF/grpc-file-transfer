@@ -9,17 +9,10 @@ service FileTransferService {
     
     // Solicitar chunk específico por ID
     rpc GetChunk(ChunkRequest) returns (ChunkResponse);
-    
-    // Registrar cliente (opcional para estadísticas)
-    rpc RegisterClient(ClientRegisterRequest) returns (ClientRegisterResponse);
-    
-    // Obtener estadísticas del servidor
-    rpc GetServerStats(ServerStatsRequest) returns (ServerStatsResponse);
 }
 
 // Request para información del archivo
 message FileInfoRequest {
-    string client_id = 1;
 }
 
 // Response con información del archivo
@@ -35,57 +28,16 @@ message FileInfoResponse {
 
 // Request para chunk específico
 message ChunkRequest {
-    string client_id = 1;
-    int32 chunk_id = 2;
+    int32 chunk_id = 1;
 }
 
 // Response con chunk de datos
 message ChunkResponse {
     int32 chunk_id = 1;
     bytes data = 2;
-    string checksum = 3;
-    int32 size = 4;
-    int64 offset = 5;
-    bool is_last = 6;
-    bool success = 7;
-    string error_message = 8;
-}
-
-// Request para registro de cliente
-message ClientRegisterRequest {
-    string client_id = 1;
-    string client_info = 2;
-}
-
-// Response de registro
-message ClientRegisterResponse {
-    bool accepted = 1;
-    string session_id = 2;
-    string server_info = 3;
-}
-
-// Request para estadísticas
-message ServerStatsRequest {
-    bool detailed = 1;
-}
-
-// Response con estadísticas
-message ServerStatsResponse {
-    int32 active_clients = 1;
-    int64 total_bytes_sent = 2;
-    int64 total_chunks_sent = 3;
-    double avg_chunks_per_second = 4;
-    double server_uptime_seconds = 5;
-    int32 cache_hits = 6;
-    int32 cache_misses = 7;
-    repeated ClientStats client_stats = 8;
-}
-
-// Estadísticas por cliente
-message ClientStats {
-    string client_id = 1;
-    int32 chunks_requested = 2;
-    int64 bytes_transferred = 3;
-    double avg_latency_ms = 4;
-    string status = 5;
+    int32 size = 3;
+    int64 offset = 4;
+    bool is_last = 5;
+    bool success = 6;
+    string error_message = 7;
 }

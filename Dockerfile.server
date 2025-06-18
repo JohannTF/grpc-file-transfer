@@ -37,4 +37,4 @@ VOLUME ["/app/data"]
 EXPOSE 50051
 
 # Comando por defecto
-CMD ["sh", "-c", "python server.py /app/data/demo_file.dat --host 0.0.0.0 --port 50051 || (echo 'Container will stay alive for inspection.' && sleep infinity)"]
+CMD ["sh", "-c", "python server.py /app/data/video.mp4 --host 0.0.0.0 --port 50051 || (echo 'Container will stay alive for inspection.' && sleep infinity)"]

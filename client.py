@@ -39,7 +39,7 @@ class RCPSimpleClient:
         self.total_chunks = 0
         self.failed_chunks = 0
     
-    async def connect(self, host: str = "localhost", port: int = 50051):
+    async def connect(self, host: str, port: int):
         """Conecta al servidor gRPC."""
         server_address = f"{host}:{port}"
         
@@ -47,9 +47,7 @@ class RCPSimpleClient:
             server_address,
             options=[
                 ('grpc.keepalive_time_ms', 30000),
-                ('grpc.keepalive_timeout_ms', 5000),
-                ('grpc.max_receive_message_length', 64 * 1024 * 1024),
-                ('grpc.max_send_message_length', 64 * 1024 * 1024),
+                ('grpc.max_receive_message_length', 5 * 1024 * 1024),
             ]
         )
         
@@ -71,7 +69,7 @@ class RCPSimpleClient:
         try:
             from src.generated import file_transfer_pb2
             
-            request = file_transfer_pb2.FileInfoRequest(client_id=self.client_id)
+            request = file_transfer_pb2.FileInfoRequest()
             response = await self.stub.GetFileInfo(request)
             
             if not response.file_ready:
@@ -92,23 +90,12 @@ class RCPSimpleClient:
                 from src.generated import file_transfer_pb2
                 
                 request = file_transfer_pb2.ChunkRequest(
-                    client_id=self.client_id,
                     chunk_id=chunk_id
                 )
-                
+
                 response = await self.stub.GetChunk(request)
                 
                 if not response.success:
-                    if attempt < max_retries:
-                        await asyncio.sleep(0.1 * (attempt + 1))
-                        continue
-                    else:
-                        self.failed_chunks += 1
-                        return None
-                
-                # Verificar checksum
-                actual_checksum = hashlib.md5(response.data).hexdigest()
-                if actual_checksum != response.checksum:
                     if attempt < max_retries:
                         await asyncio.sleep(0.1 * (attempt + 1))
                         continue
@@ -186,16 +173,38 @@ class RCPSimpleClient:
                     if chunk_data:
                         f.write(chunk_data)
             
+            # Validar integridad del archivo descargado
+            logger.info("Validating file integrity...")
+            downloaded_checksum = self._calculate_file_checksum(output_file)
+            
+            if downloaded_checksum != file_info.file_checksum:
+                logger.error(f"File integrity check failed! Expected: {file_info.file_checksum}, Got: {downloaded_checksum}")
+                return False
+            
             # Estadísticas finales
             elapsed = time.time() - self.start_time
             avg_speed = (self.bytes_downloaded / 1024 / 1024) / elapsed if elapsed > 0 else 0
             
             logger.info(f"Download completed: {self.bytes_downloaded:,} bytes in {elapsed:.2f}s ({avg_speed:.2f} MB/s)")
+            logger.info("File integrity verified")
             return True
                 
         except Exception as e:
             logger.error(f"Error writing file: {e}")
             return False
+    
+    def _calculate_file_checksum(self, file_path: Path) -> str:
+        """Calcula el checksum SHA-256 del archivo descargado."""
+        hash_sha256 = hashlib.sha256()
+        
+        with open(file_path, 'rb') as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                hash_sha256.update(chunk)
+        
+        return hash_sha256.hexdigest()
 
 
 async def main():
@@ -203,9 +212,9 @@ async def main():
     parser = argparse.ArgumentParser(description="RPC Client")
     parser.add_argument("--host", default="localhost", help="Server host (default: localhost)")
     parser.add_argument("--port", type=int, default=50051, help="Server port (default: 50051)")
-    parser.add_argument("--output", default="downloaded_file", help="Output file (default: downloaded_file)")
+    parser.add_argument("--output", required=True, help="Output file")
     parser.add_argument("--client-id", help="Client ID (default: auto-generated)")
-    parser.add_argument("--concurrent", type=int, default=10, help="Concurrent chunks (default: 10)")
+    parser.add_argument("--concurrent", type=int, default=5, help="Concurrent chunks (default: 5")
     
     args = parser.parse_args()
     

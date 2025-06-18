@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from src.chunk_controller import PrecomputedChunkController
-from src.grpc_server import create_server, cleanup_task
+from src.grpc_server import create_server
 
 
 class RCPSimpleServer:
@@ -30,9 +30,9 @@ class RCPSimpleServer:
         self.chunk_controller = None
         self.grpc_server = None
         self.service_impl = None
-        self.cleanup_task_handle = None
         self.running = False
-    async def initialize(self, file_path: str, chunk_size: int = 4 * 1024 * 1024):
+    
+    async def initialize(self, file_path: str, chunk_size: int):
         """Inicializa el servidor y pre-computa el archivo."""
         logger.info("Initializing RPC Server")
         
@@ -45,7 +45,7 @@ class RCPSimpleServer:
             logger.error(f"Initialization failed: {e}")
             raise
     
-    async def start(self, host: str = "localhost", port: int = 50051):
+    async def start(self, host: str, port: int):
         """Inicia el servidor gRPC."""
         if not self.chunk_controller or not self.chunk_controller.precomputed:
             raise RuntimeError("Server not initialized")
@@ -57,17 +57,13 @@ class RCPSimpleServer:
             
             await self.grpc_server.start()
             
-            self.cleanup_task_handle = asyncio.create_task(
-                cleanup_task(self.service_impl)
-            )
-            
             self.running = True
             logger.info(f"Server started on {host}:{port}")
             
         except Exception as e:
             logger.error(f"Failed to start server: {e}")
             raise
-    
+           
     async def stop(self):
         """Detiene el servidor."""
         if not self.running:
@@ -75,19 +71,12 @@ class RCPSimpleServer:
         
         logger.info("Stopping server")
         
-        if self.cleanup_task_handle:
-            self.cleanup_task_handle.cancel()
-            try:
-                await self.cleanup_task_handle
-            except asyncio.CancelledError:
-                pass
-        
         if self.grpc_server:
             await self.grpc_server.stop(grace=5.0)
         
         self.running = False
         logger.info("Server stopped")
-    
+        
     async def wait_for_termination(self):
         """Espera hasta que el servidor sea terminado."""
         if self.grpc_server:
@@ -119,10 +108,8 @@ async def main():
     try:
         await server.initialize(str(file_path), args.chunk_size)
         await server.start(args.host, args.port)
-        
         logger.info("Server ready - Press Ctrl+C to stop")
         await server.wait_for_termination()
-        
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")
     except Exception as e:
@@ -130,7 +117,6 @@ async def main():
         sys.exit(1)
     finally:
         await server.stop()
-
 
 if __name__ == "__main__":
     try:
