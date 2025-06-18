@@ -10,29 +10,49 @@ Sistema de transferencia de archivos gRPC optimizado que utiliza chunks pre-comp
 
 ## 🚀 Instalación y Ejecución
 
+Clonar el repositorio y comenzar:
+
+```bash
+# 1. Clona el repositorio
+git clone https://github.com/JohannTF/grpc-file-transfer.git
+
+# 2. Ingresa al directorio del proyecto
+cd grpc-file-transfer
+```
+
+Luego, sigue las instrucciones de las secciones siguientes para configurar el entorno y ejecutar el sistema según tu preferencia.
+
 ### **Opción 1: Entorno Local para Desarrollo**
 
 ```bash
 # 1. Crear entorno virtual
 python -m venv env
-env\Scripts\activate  # Windows
-# source env/bin/activate  # Linux
+# Windows:
+env\Scripts\activate
+# Linux:
+source env/bin/activate
 
 # 2. Instalar dependencias
 pip install --upgrade pip
 pip install -r requirements.txt
 
+# 3. Crear estructura y generar código gRPC
+# Windows:
+mkdir data
+mkdir src\generated
+echo . > src\generated\__init__.py
+# Linux:
+mkdir -p data src/generated && touch src/generated/__init__.py
+
 # 3. Generar código gRPC
-mkdir data src\generated 2>nul  # Windows
-# mkdir -p data src/generated  # Linux
-echo. > src\generated\__init__.py  # Windows
-# touch src/generated/__init__.py  # Linux
 python -m grpc_tools.protoc --proto_path=protos --python_out=src/generated --grpc_python_out=src/generated protos/file_transfer.proto
 
 # 4. Preparar archivo de datos
-# Copiar o mover tu archivo MP4/video a la carpeta data/ (ya sea con comandos o manualmente)
-copy "mi_video.mp4" data\  # Windows
-# cp mi_video.mp4 data/  # Linux
+# Copiar o mover tu archivo MP4 a la carpeta 'data/' (ya sea con comandos o manualmente)
+# Windows:
+copy "mi_video.mp4" data\
+# Linux:
+cp mi_video.mp4 data/
 
 # 5. Ejecutar servidor (Terminal 1)
 python server.py data/mi_video.mp4
@@ -44,40 +64,44 @@ python client.py --output mi_video_descargado.mp4
 ### **Opción 2: Entorno Real (Sin Virtual Environment)**
 
 ```bash
-# 1. Instalar dependencias globalmente
-pip install --upgrade pip
-pip install grpcio grpcio-tools protobuf aiofiles psutil structlog colorama click pydantic
+# 1. Instalar dependencias
+pip install -r requirements.txt
 
-# 2. Generar código gRPC
+# 2. Crear estructura
+# Windows:
+mkdir data
+mkdir src\generated
+echo . > src\generated\__init__.py
+# Linux:
+mkdir -p data src/generated && touch src/generated/__init__.py
+
+# 3. Generar código gRPC
 python -m grpc_tools.protoc --proto_path=protos --python_out=src/generated --grpc_python_out=src/generated protos/file_transfer.proto
 
-# 3. Preparar archivo y ejecutar
-mkdir data
-copy "tu_video.mp4" data\
-python server.py data/video_grande.mp4 --host 0.0.0.0
-python client.py --host IP_DEL_SERVIDOR --output video_descargado.mp4
+# 4. Ejecutar
+python server.py tu_archivo.mp4 --host 0.0.0.0
+python client.py --host IP_DEL_SERVIDOR --output archivo_descargado.mp4
 ```
 
 ### **Opción 3: Testing con Docker (Múltiples Clientes)**
 
 ```bash
 # 1. Preparar archivo de datos (LEER LA SECCIÓN DE CONFIGURACIÓN IMPORTANTE MÁS ABAJO)
+# Colocar archivo en directorio data/ con el nombre correcto en Dockerfile.server
 
-# 2. Construir imágenes
-docker build -f Dockerfile.server -t rcp-server .
-docker build -f Dockerfile.client -t rcp-client .
-
-# 3. Ejecutar 5 clientes simultáneos
+# 2. Ejecutar con docker-compose
 docker-compose up --build
 
-# 4. O ejecutar manualmente
+# 3. O ejecutar manualmente
 # Servidor:
-docker run -p 50051:50051 -v "%cd%/data:/app/data:ro" --name rcp-server rcp-server
+# Windows:
+docker run -p 50051:50051 -v "$(pws)/data:/app/data:ro" --name rcp-server rcp-server
+# Linux:
+docker run -p 50051:50051 -v "$(pwd)/data:/app/data:ro" --name rcp-server rcp-server
 
-# Clientes (en terminales separadas):
-# Asegurate de asignar el nombre de salida de tu archivo y la extensión correctamente
-docker run --link rcp-server:server --name client1 rcp-client python client.py --host server --output NOMBRE_SALIDA.extensión
-docker run --link rcp-server:server --name client2 rcp-client python client.py --host server --output NOMBRE_SALIDA.extensión
+# Clientes:
+docker run --link rcp-server:server --name client1 rcp-client
+docker run --link rcp-server:server --name client2 rcp-client
 ```
 
 ## ⚠️ Configuración Importante
@@ -111,19 +135,18 @@ python client.py --output archivo_descargado.zip
 ## 🔧 Comandos Útiles
 
 ```bash
-# Ver ayuda del servidor
+# Ver ayuda
 python server.py --help
+python client.py --help
 
-# Servidor con puerto personalizado
-python server.py data/mi_video.mp4 --port 8080
+# Servidor con configuraciones específicas
+python server.py mi_archivo.mp4 --host 0.0.0.0 --port 8080 --chunk-size 8388608
 
-# Cliente con más concurrencia
-python client.py --concurrent 20 --output mi_descarga.mp4
+# Cliente con configuraciones específicas
+python client.py --host 192.168.1.100 --port 8080 --concurrent 10 --output mi_descarga.mp4
 
-# Limpiar contenedores
-# Para docker-compose
+# Limpiar contenedores Docker
 docker-compose down -v
-# Para Testing con docker
-docker rm rcp-server client1 client2 client3 client4 client5 2>/dev/null
-docker rmi rcp-server rcp-client 2>/dev/null
+docker container prune -f
+docker image prune -f
 ```
