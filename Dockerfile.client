@@ -31,4 +31,4 @@ COPY client.py .
 ENV PYTHONPATH="/app/src/generated:/app/src:/app"
 
 # Comando por defecto
-CMD ["sh", "-c", "python client.py --host server --output downloaded_file.dat && echo 'Container will stay alive for inspection.' && sleep infinity"]
+CMD ["sh", "-c", "python client.py --host server --output downloaded_file.mp4 && echo 'Container will stay alive for inspection.' && sleep infinity"]

@@ -31,7 +31,7 @@ services:
         condition: service_healthy
     networks:
       - rcp-network
-    command: ["sh", "-c", "python client.py --host server --client-id client_1 --output download_1.dat --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
+    command: ["sh", "-c", "python client.py --host server --client-id client_1 --output download_1.mp4 --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
     container_name: rcp-client-1
 
   # Cliente 2
@@ -44,7 +44,7 @@ services:
         condition: service_healthy
     networks:
       - rcp-network
-    command: ["sh", "-c", "python client.py --host server --client-id client_2 --output download_2.dat --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
+    command: ["sh", "-c", "python client.py --host server --client-id client_2 --output download_2.mp4 --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
     container_name: rcp-client-2
 
   # Cliente 3
@@ -57,7 +57,7 @@ services:
         condition: service_healthy
     networks:
       - rcp-network
-    command: ["sh", "-c", "python client.py --host server --client-id client_3 --output download_3.dat --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
+    command: ["sh", "-c", "python client.py --host server --client-id client_3 --output download_3.mp4 --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
     container_name: rcp-client-3
 
   # Cliente 4
@@ -70,7 +70,7 @@ services:
         condition: service_healthy
     networks:
       - rcp-network
-    command: ["sh", "-c", "python client.py --host server --client-id client_4 --output download_4.dat --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
+    command: ["sh", "-c", "python client.py --host server --client-id client_4 --output download_4.mp4 --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
     container_name: rcp-client-4
 
   # Cliente 5
@@ -83,7 +83,7 @@ services:
         condition: service_healthy
     networks:
       - rcp-network
-    command: ["sh", "-c", "python client.py --host server --client-id client_5 --output download_5.dat --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
+    command: ["sh", "-c", "python client.py --host server --client-id client_5 --output download_5.mp4 --concurrent 5 && echo 'Container will stay alive for inspection.' && sleep infinity"]
     container_name: rcp-client-5
 
 networks:

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Cliente RPC 
+Cliente RCP híbrido optimizado
+Combina pool de conexiones con concurrencia interna controlada
 """
 
 import asyncio
@@ -8,10 +9,9 @@ import sys
 import time
 import argparse
 from pathlib import Path
-import hashlib
 import logging
 
-# Configurar logging simple
+# Configurar logging
 logging.basicConfig(
     level=logging.INFO,
     format='[%(levelname)s] %(message)s'
@@ -20,15 +20,28 @@ logger = logging.getLogger(__name__)
 
 # Agregar src al path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent / "src" / "generated"))
 
 import grpc
 
+# Importar generated code con fallbacks
+try:
+    from src.generated import file_transfer_pb2, file_transfer_pb2_grpc
+except ImportError:
+    try:
+        import file_transfer_pb2
+        import file_transfer_pb2_grpc
+    except ImportError:
+        logger.error("Generated gRPC code not found")
+        sys.exit(1)
 
-class RCPSimpleClient:
-    """Cliente para descargar archivos."""
+
+class Client:
+    """Cliente optimizado para pool con concurrencia controlada."""
     
-    def __init__(self, client_id: str = None):
+    def __init__(self, client_id: str = None, concurrent_chunks: int = 3):
         self.client_id = client_id or f"client_{int(time.time())}"
+        self.concurrent_chunks = concurrent_chunks
         self.channel = None
         self.stub = None
         
@@ -38,28 +51,33 @@ class RCPSimpleClient:
         self.bytes_downloaded = 0
         self.total_chunks = 0
         self.failed_chunks = 0
+        
+        # Control de estado
+        self.download_active = False
+        self.last_progress_time = 0
     
-    async def connect(self, host: str = "localhost", port: int = 50051):
-        """Conecta al servidor gRPC."""
+    async def connect(self, host: str, port: int):
+        """Conecta al servidor con configuración optimizada."""
         server_address = f"{host}:{port}"
         
+        # Configuración agresiva para velocidad
         self.channel = grpc.aio.insecure_channel(
             server_address,
             options=[
-                ('grpc.keepalive_time_ms', 30000),
-                ('grpc.keepalive_timeout_ms', 5000),
-                ('grpc.max_receive_message_length', 64 * 1024 * 1024),
-                ('grpc.max_send_message_length', 64 * 1024 * 1024),
+                ('grpc.keepalive_time_ms', 30000),  # 30s - más agresivo
+                ('grpc.keepalive_timeout_ms', 10000),  # 10s timeout
+                ('grpc.keepalive_permit_without_calls', True),
+                ('grpc.max_receive_message_length', 8 * 1024 * 1024),  # 8MB
+                ('grpc.max_send_message_length', 1024 * 1024),
+                ('grpc.http2.max_pings_without_data', 0),
+                ('grpc.http2.min_time_between_pings_ms', 10000),
+                ('grpc.enable_retries', 1),
+                ('grpc.max_retry_attempts', 3),
             ]
         )
         
-        try:
-            from src.generated import file_transfer_pb2_grpc
-            self.stub = file_transfer_pb2_grpc.FileTransferServiceStub(self.channel)
-            logger.info(f"Connected to server at {server_address}")
-        except ImportError:
-            logger.error("Generated gRPC code not found")
-            raise
+        self.stub = file_transfer_pb2_grpc.FileTransferServiceStub(self.channel)
+        logger.info(f"[{self.client_id}] Connected to server at {server_address}")
     
     async def disconnect(self):
         """Desconecta del servidor."""
@@ -67,166 +85,222 @@ class RCPSimpleClient:
             await self.channel.close()
     
     async def get_file_info(self):
-        """Obtiene información del archivo disponible."""
+        """Obtiene información del archivo con timeout."""
         try:
-            from src.generated import file_transfer_pb2
-            
-            request = file_transfer_pb2.FileInfoRequest(client_id=self.client_id)
-            response = await self.stub.GetFileInfo(request)
+            request = file_transfer_pb2.FileInfoRequest()
+            response = await asyncio.wait_for(
+                self.stub.GetFileInfo(request),
+                timeout=30  # 30s timeout
+            )
             
             if not response.file_ready:
-                logger.error("File not available on server")
+                logger.error(f"[{self.client_id}] File not available on server")
                 return None
             
-            logger.info(f"File info: {response.filename} ({response.file_size:,} bytes, {response.total_chunks:,} chunks)")
+            logger.info(f"[{self.client_id}] File: {response.filename} ({response.file_size:,} bytes, {response.total_chunks:,} chunks)")
             return response
             
         except Exception as e:
-            logger.error(f"Error getting file info: {e}")
+            logger.error(f"[{self.client_id}] Error getting file info: {e}")
             return None
     
-    async def download_chunk(self, chunk_id: int, max_retries: int = 3):
-        """Descarga un chunk específico."""
+    async def download_chunk(self, chunk_id: int, max_retries: int = 2):
+        """Descarga un chunk con timeout corto y reintentos mínimos."""
         for attempt in range(max_retries + 1):
             try:
-                from src.generated import file_transfer_pb2
+                request = file_transfer_pb2.ChunkRequest(chunk_id=chunk_id)
                 
-                request = file_transfer_pb2.ChunkRequest(
-                    client_id=self.client_id,
-                    chunk_id=chunk_id
+                # Timeout corto para detectar problemas rápido
+                response = await asyncio.wait_for(
+                    self.stub.GetChunk(request),
+                    timeout=45  # 45s timeout
                 )
                 
-                response = await self.stub.GetChunk(request)
-                
                 if not response.success:
-                    if attempt < max_retries:
-                        await asyncio.sleep(0.1 * (attempt + 1))
+                    if "Server busy" in response.error_message:
+                        # Pool lleno - esperar menos tiempo
+                        logger.warning(f"[{self.client_id}] Pool busy for chunk {chunk_id}")
+                        await asyncio.sleep(5 + attempt)
                         continue
                     else:
-                        self.failed_chunks += 1
-                        return None
-                
-                # Verificar checksum
-                actual_checksum = hashlib.md5(response.data).hexdigest()
-                if actual_checksum != response.checksum:
-                    if attempt < max_retries:
-                        await asyncio.sleep(0.1 * (attempt + 1))
-                        continue
-                    else:
+                        logger.warning(f"[{self.client_id}] Chunk {chunk_id} failed: {response.error_message}")
                         self.failed_chunks += 1
                         return None
                 
                 return response
                 
-            except Exception:
+            except asyncio.TimeoutError:
+                logger.warning(f"[{self.client_id}] Timeout chunk {chunk_id}, attempt {attempt + 1}")
                 if attempt < max_retries:
-                    await asyncio.sleep(0.2 * (attempt + 1))
+                    await asyncio.sleep(2)
+                else:
+                    self.failed_chunks += 1
+                    return None
+            except Exception as e:
+                logger.warning(f"[{self.client_id}] Error chunk {chunk_id}: {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(1)
                 else:
                     self.failed_chunks += 1
                     return None
         
         return None
     
-    async def download_file(self, output_path: str, max_concurrent: int = 10) -> bool:
-        """Descarga el archivo completo."""
+    async def download_file(self, output_path: str) -> bool:
+        """Descarga con concurrencia controlada optimizada."""
         file_info = await self.get_file_info()
         if not file_info:
             return False
         
         self.total_chunks = file_info.total_chunks
         self.start_time = time.time()
+        self.download_active = True
         
         output_file = Path(output_path)
         output_file.parent.mkdir(parents=True, exist_ok=True)
         
-        logger.info(f"Starting download: {file_info.filename} -> {output_path}")
+        logger.info(f"[{self.client_id}] Starting download")
         
         # Semáforo para controlar concurrencia
-        semaphore = asyncio.Semaphore(max_concurrent)
+        semaphore = asyncio.Semaphore(self.concurrent_chunks)
         chunks_data = [None] * self.total_chunks
+        download_status = [False] * self.total_chunks
+        
+        # Monitor de progreso
+        progress_task = asyncio.create_task(self._progress_monitor())
         
         async def download_chunk_worker(chunk_id: int):
             async with semaphore:
+                if not self.download_active:
+                    return False
+                    
                 chunk_response = await self.download_chunk(chunk_id)
+                
                 if chunk_response:
                     chunks_data[chunk_id] = chunk_response.data
+                    download_status[chunk_id] = True
                     self.chunks_downloaded += 1
                     self.bytes_downloaded += len(chunk_response.data)
-                    
-                    # Progress cada 200 chunks (con chunks de 4MB es más frecuente)
-                    if (chunk_id + 1) % 200 == 0 or chunk_response.is_last:
-                        progress = (self.chunks_downloaded / self.total_chunks) * 100
-                        logger.info(f"Progress: {progress:.0f}% ({self.chunks_downloaded}/{self.total_chunks})")
-                    
                     return True
-                return False
-        
-        # Crear tareas para todos los chunks
-        tasks = [
-            asyncio.create_task(download_chunk_worker(chunk_id))
-            for chunk_id in range(self.total_chunks)
-        ]
-        
-        # Ejecutar todas las tareas
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Verificar resultados
-        successful_chunks = sum(1 for result in results if result is True)
-        
-        if successful_chunks != self.total_chunks:
-            logger.error(f"Download incomplete: {successful_chunks}/{self.total_chunks} chunks")
-            return False
-        
-        # Escribir archivo completo
-        logger.info("Writing file...")
+                else:
+                    download_status[chunk_id] = False
+                    return False
         
         try:
+            # Crear tareas para todos los chunks
+            tasks = [
+                asyncio.create_task(download_chunk_worker(chunk_id))
+                for chunk_id in range(self.total_chunks)
+            ]
+            
+            # Ejecutar con timeout global
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=1800  # 30 minutos máximo
+            )
+            
+            self.download_active = False
+            progress_task.cancel()
+            
+            # Verificar resultados
+            successful_chunks = sum(1 for result in results if result is True)
+            
+            if successful_chunks != self.total_chunks:
+                logger.error(f"[{self.client_id}] Download incomplete: {successful_chunks}/{self.total_chunks} chunks")
+                
+                # Mostrar chunks fallidos para debug
+                failed_chunks = [i for i, status in enumerate(download_status) if not status]
+                if failed_chunks:
+                    logger.error(f"[{self.client_id}] Failed chunks: {failed_chunks[:10]}..." if len(failed_chunks) > 10 else f"Failed chunks: {failed_chunks}")
+                
+                return False
+            
+            # Escribir archivo
+            logger.info(f"[{self.client_id}] Writing file...")
+            
             with open(output_file, 'wb') as f:
                 for chunk_data in chunks_data:
                     if chunk_data:
                         f.write(chunk_data)
             
+            # Verificar tamaño
+            downloaded_size = output_file.stat().st_size
+            expected_size = file_info.file_size
+            
+            if downloaded_size != expected_size:
+                logger.error(f"[{self.client_id}] Size mismatch! Expected: {expected_size:,}, Got: {downloaded_size:,}")
+                return False
+            
             # Estadísticas finales
             elapsed = time.time() - self.start_time
             avg_speed = (self.bytes_downloaded / 1024 / 1024) / elapsed if elapsed > 0 else 0
             
-            logger.info(f"Download completed: {self.bytes_downloaded:,} bytes in {elapsed:.2f}s ({avg_speed:.2f} MB/s)")
+            logger.info(f"[{self.client_id}] ✅ Download completed: {self.bytes_downloaded:,} bytes in {elapsed:.1f}s ({avg_speed:.1f} MB/s)")
             return True
                 
-        except Exception as e:
-            logger.error(f"Error writing file: {e}")
+        except asyncio.TimeoutError:
+            self.download_active = False
+            progress_task.cancel()
+            logger.error(f"[{self.client_id}] Download timeout after 30 minutes")
             return False
+        except Exception as e:
+            self.download_active = False
+            progress_task.cancel()
+            logger.error(f"[{self.client_id}] Download error: {e}")
+            return False
+    
+    async def _progress_monitor(self):
+        """Monitor de progreso cada 10 segundos."""
+        try:
+            while self.download_active:
+                await asyncio.sleep(10)
+                if self.download_active and self.total_chunks > 0:
+                    progress = (self.chunks_downloaded / self.total_chunks) * 100
+                    elapsed = time.time() - self.start_time
+                    speed = (self.bytes_downloaded / 1024 / 1024) / elapsed if elapsed > 0 else 0
+                    
+                    logger.info(f"[{self.client_id}] Progress: {progress:.1f}% ({self.chunks_downloaded}/{self.total_chunks}) - {speed:.1f} MB/s")
+                    
+                    # Detectar si está atascado
+                    if time.time() - self.last_progress_time > 120:  # 2 minutos sin progreso
+                        if self.chunks_downloaded == getattr(self, '_last_chunks', 0):
+                            logger.warning(f"[{self.client_id}] Download seems stuck, continuing...")
+                    
+                    self._last_chunks = self.chunks_downloaded
+                    self.last_progress_time = time.time()
+        except asyncio.CancelledError:
+            pass
 
 
 async def main():
     """Función principal del cliente."""
-    parser = argparse.ArgumentParser(description="RPC Client")
-    parser.add_argument("--host", default="localhost", help="Server host (default: localhost)")
-    parser.add_argument("--port", type=int, default=50051, help="Server port (default: 50051)")
-    parser.add_argument("--output", default="downloaded_file", help="Output file (default: downloaded_file)")
-    parser.add_argument("--client-id", help="Client ID (default: auto-generated)")
-    parser.add_argument("--concurrent", type=int, default=10, help="Concurrent chunks (default: 10)")
+    parser = argparse.ArgumentParser(description="Optimized Pool Client")
+    parser.add_argument("--host", default="localhost", help="Server host")
+    parser.add_argument("--port", type=int, default=50051, help="Server port")
+    parser.add_argument("--output", required=True, help="Output file")
+    parser.add_argument("--client-id", help="Client ID")
+    parser.add_argument("--concurrent", type=int, default=3, help="Concurrent chunks (default: 3)")
     
     args = parser.parse_args()
     
-    client = RCPSimpleClient(args.client_id)
+    client = Client(args.client_id, args.concurrent)
     
     try:
         await client.connect(args.host, args.port)
-        success = await client.download_file(args.output, args.concurrent)
+        success = await client.download_file(args.output)
         
         if success:
-            logger.info("Download successful!")
+            logger.info(f"[{client.client_id}] ✅ Download successful!")
             sys.exit(0)
         else:
-            logger.error("Download failed")
+            logger.error(f"[{client.client_id}] ❌ Download failed")
             sys.exit(1)
             
     except KeyboardInterrupt:
-        logger.info("Download cancelled")
+        logger.info(f"[{client.client_id}] Download cancelled")
         sys.exit(1)
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.error(f"[{client.client_id}] Fatal error: {e}")
         sys.exit(1)
     finally:
         await client.disconnect()

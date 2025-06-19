@@ -193,3 +193,22 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 /data/
+/src/generated/
+/.vscode/
+
+# Video files
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.wmv
+*.flv
+
+# Document files
+*.pdf
+
+# Archive files
+*.zip
+
+# Executable files
+*.exe
