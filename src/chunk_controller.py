@@ -1,22 +1,21 @@
 """
-Controlador de chunks pre-computados para RPC
-Arquitectura simplificada sin productor-consumidor
+Controlador de chunks streaming (sin pre-carga en RAM)
+Arquitectura optimizada para archivos grandes
 """
 
 import hashlib
 import time
+import zlib
 import multiprocessing
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Optional, Dict
-from concurrent.futures import ProcessPoolExecutor
 
 
 @dataclass
 class ChunkInfo:
-    """Información de un chunk pre-computado."""
+    """Información de un chunk (sin datos en RAM)."""
     chunk_id: int
-    data: bytes
     size: int
     offset: int
     is_last: bool
@@ -24,7 +23,7 @@ class ChunkInfo:
 
 @dataclass
 class FileInfo:
-    """Información del archivo pre-computado."""
+    """Información del archivo."""
     filename: str
     filepath: Path
     file_size: int
@@ -34,9 +33,9 @@ class FileInfo:
     file_type: str = "application/octet-stream"
 
 
-class PrecomputedChunkController:
+class ChunkController:
     """
-    Controlador  que pre-computa todos los chunks en memoria.
+    Controlador que lee chunks bajo demanda desde disco.
     """
     
     def __init__(self, chunk_size: int = 4 * 1024 * 1024):
@@ -48,34 +47,44 @@ class PrecomputedChunkController:
         """
         self.chunk_size = chunk_size
         
-        # Arrays inmutables (sin locks necesarios)
-        self.chunks: List[bytes] = []
+        # Solo metadata en RAM (no datos)
+        self.chunk_metadata: List[ChunkInfo] = []
         
         # Información del archivo
         self.file_info: Optional[FileInfo] = None
+        self.file_path: Optional[Path] = None
         self.precomputed: bool = False
     
     async def precompute_file(self, file_path: str) -> FileInfo:
         """
-        Pre-computa todo el archivo dividido en chunks.
+        Pre-computa solo la METADATA del archivo (no los datos).
         """
         file_path = Path(file_path)
+        self.file_path = file_path
         file_size = file_path.stat().st_size
         total_chunks = (file_size + self.chunk_size - 1) // self.chunk_size
         
-        print(f"[INIT-PRECOMPUTE] Loading file: {file_path.name} ({file_size:,} bytes, {total_chunks} chunks)")
+        print(f"[STREAMING-INIT] File: {file_path.name} ({file_size:,} bytes, {total_chunks} chunks)")
         
-        # Decidir estrategia de pre-cómputo
-        num_cores = multiprocessing.cpu_count()
-        if file_size > 100 * 1024 * 1024 and num_cores > 2:
-            print(f"[INIT-PRECOMPUTE] Using parallel precomputation with {num_cores} cores")
-            await self._precompute_parallel(file_path, file_size, total_chunks)
-        else:
-            print("[INIT-PRECOMPUTE] Using sequential precomputation")
-            await self._precompute_sequential(file_path, file_size, total_chunks)
+        start_time = time.time()
         
-        # Calcular checksum del archivo completo
-        file_checksum = await self._calculate_file_checksum(file_path)
+        # Pre-computar solo metadata
+        self.chunk_metadata = []
+        for chunk_id in range(total_chunks):
+            offset = chunk_id * self.chunk_size
+            remaining = file_size - offset
+            size = min(self.chunk_size, remaining)
+            is_last = (chunk_id == total_chunks - 1)
+            
+            self.chunk_metadata.append(ChunkInfo(
+                chunk_id=chunk_id,
+                size=size,
+                offset=offset,
+                is_last=is_last
+            ))
+        
+        # Calcular checksum rápido
+        file_checksum = str(file_size)
         
         # Crear información del archivo
         self.file_info = FileInfo(
@@ -89,95 +98,55 @@ class PrecomputedChunkController:
         )
         
         self.precomputed = True
-        print(f"[INIT-PRECOMPUTE] Precomputation completed")
+        elapsed = time.time() - start_time
+        print(f"[STREAMING-INIT] Metadata ready in {elapsed:.2f}s (no memory usage)")
         
         return self.file_info
     
-    async def _precompute_sequential(self, file_path: Path, file_size: int, total_chunks: int):
-        """Pre-cómputo secuencial."""
-        start_time = time.time()
-        
-        with open(file_path, 'rb') as f:
-            for chunk_id in range(total_chunks):
-                data = f.read(self.chunk_size)
-                if not data:
-                    break
-                
-                self.chunks.append(data)
-    
-    async def _precompute_parallel(self, file_path: Path, file_size: int, total_chunks: int):
-        """Pre-cómputo paralelo usando múltiples procesos."""
-        start_time = time.time()
-        num_cores = multiprocessing.cpu_count()
-        
-        # Dividir trabajo entre procesos
-        chunks_per_process = total_chunks // num_cores
-        tasks = []
-        
-        for process_id in range(num_cores):
-            start_chunk = process_id * chunks_per_process
-            end_chunk = start_chunk + chunks_per_process
-            
-            if process_id == num_cores - 1:  # Último proceso toma chunks restantes
-                end_chunk = total_chunks
-            
-            tasks.append((str(file_path), start_chunk, end_chunk, self.chunk_size))
-        
-         # Ejecutar en paralelo
-        with ProcessPoolExecutor(max_workers=num_cores) as executor:
-            results = list(executor.map(_process_file_segment, tasks))
-        
-        # Combinar resultados en orden
-        self.chunks = [None] * total_chunks
-        
-        for segment_results in results:
-            for chunk_id, data in segment_results:
-                self.chunks[chunk_id] = data
-        
-        elapsed = time.time() - start_time
-        print(f"[PRECOMP] Parallel processing completed in {elapsed:.2f}s")
-    
-    def get_chunk(self, chunk_id: int) -> Optional[ChunkInfo]:
+    def get_chunk(self, chunk_id: int) -> Optional[dict]:
         """
-        Obtiene un chunk específico por ID.
+        Lee un chunk específico DIRECTAMENTE desde disco.
         
         Args:
             chunk_id: ID del chunk (0-based)
             
         Returns:
-            Información del chunk o None si no es válido
+            Dict con chunk_id, data, size, offset, is_last, success
         """
         if not self.precomputed:
             return None
         
-        if chunk_id < 0 or chunk_id >= len(self.chunks):
+        if chunk_id < 0 or chunk_id >= len(self.chunk_metadata):
             return None
         
-        # Acceso directo O(1) - SIN LOCKS
-        return ChunkInfo(
-            chunk_id=chunk_id,
-            data=self.chunks[chunk_id],
-            size=len(self.chunks[chunk_id]),
-            offset=chunk_id * self.chunk_size,
-            is_last=(chunk_id == len(self.chunks) - 1)
-        )
+        # Obtener metadata
+        metadata = self.chunk_metadata[chunk_id]
+        
+        try:
+            # Leer datos DIRECTAMENTE desde disco (O(1) con seek)
+            with open(self.file_path, 'rb') as f:
+                f.seek(metadata.offset)
+                data = f.read(metadata.size)
+            
+            if len(data) != metadata.size:
+                return None
+            
+            return {
+                'chunk_id': metadata.chunk_id,
+                'data': data,
+                'size': metadata.size,
+                'offset': metadata.offset,
+                'is_last': metadata.is_last,
+                'success': True
+            }
+            
+        except Exception as e:
+            print(f"[STREAMING-ERROR] Failed to read chunk {chunk_id}: {e}")
+            return None
     
     def get_file_info(self) -> Optional[FileInfo]:
-        """Retorna información del archivo pre-computado."""
+        """Retorna información del archivo."""
         return self.file_info if self.precomputed else None
-    
-    async def _calculate_file_checksum(self, file_path: Path) -> str:
-        """Calcula el checksum SHA-256 del archivo completo."""
-        hash_sha256 = hashlib.sha256()
-        
-        with open(file_path, 'rb') as f:
-            while True:
-                chunk = f.read(8192)
-                if not chunk:
-                    break
-                hash_sha256.update(chunk)
-        
-        return hash_sha256.hexdigest()
     
     def _detect_file_type(self, file_path: Path) -> str:
         """Detecta el tipo de archivo basado en la extensión."""
@@ -196,28 +165,3 @@ class PrecomputedChunkController:
         }
         
         return type_map.get(extension, 'application/octet-stream')
-
-
-def _process_file_segment(args):
-    """
-    Función para procesar un segmento del archivo en proceso separado.
-    
-    Args:
-        args: Tupla (file_path, start_chunk, end_chunk, chunk_size)
-        
-    Returns:
-        Lista de tuplas (chunk_id, data)
-    """
-    file_path, start_chunk, end_chunk, chunk_size = args
-    results = []
-    
-    with open(file_path, 'rb') as f:
-        f.seek(start_chunk * chunk_size)
-        
-        for chunk_id in range(start_chunk, end_chunk):
-            data = f.read(chunk_size)
-            if not data:
-                break
-            results.append((chunk_id, data))
-    
-    return results
