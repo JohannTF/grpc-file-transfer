@@ -58,7 +58,6 @@ class Server:
         
     async def _create_grpc_server(self):
         """Crea el servidor gRPC con configuración optimizada."""
-        # Usar el mismo enfoque de importación que el cliente
         current_dir = Path(__file__).parent
         generated_dir = current_dir / "src" / "generated"
         if generated_dir.exists():

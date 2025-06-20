@@ -134,7 +134,7 @@ class Client:
                 if response.authorized:
                     if self.queue_wait_start_time:
                         wait_time = time.time() - self.queue_wait_start_time
-                        logger.info(f"Queue wait completed after {wait_time:.1f}s")
+                        logger.info(f"Time waited in the Queue: {wait_time:.1f}s")
                     return True
                 elif response.in_queue:
                     await asyncio.sleep(2)
