@@ -11,7 +11,7 @@
 FILE_TO_SHARE="video.mp4"
 
 # Configuración del servidor
-SERVER_HOST="10.147.20.4"
+SERVER_HOST="0.0.0.0"
 SERVER_PORT="50051"
 
 # Configuración de chunks (en bytes)
