@@ -1,8 +1,4 @@
-aiofiles
-grpcio
-grpcio-tools
-protobuf
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+protobuf>=4.21.0,<6.0.0
 psutil
-pydantic
-structlog
-colorama
