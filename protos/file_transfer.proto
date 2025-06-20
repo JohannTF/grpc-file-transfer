@@ -2,12 +2,18 @@ syntax = "proto3";
 
 package rcp_simple;
 
-// Servicio  para transferencia de archivos
+// Servicio para transferencia de archivos con cola de espera
 service FileTransferService {
     // Obtener información del archivo disponible
     rpc GetFileInfo(FileInfoRequest) returns (FileInfoResponse);
     
-    // Solicitar chunk específico por ID
+    // Unirse a la cola de espera
+    rpc JoinQueue(JoinQueueRequest) returns (JoinQueueResponse);
+    
+    // Verificar estado en la cola
+    rpc CheckQueueStatus(QueueStatusRequest) returns (QueueStatusResponse);
+    
+    // Solicitar chunk específico por ID (solo para clientes autorizados)
     rpc GetChunk(ChunkRequest) returns (ChunkResponse);
 }
 
@@ -26,9 +32,38 @@ message FileInfoResponse {
     bool file_ready = 7;
 }
 
+// Request para unirse a la cola
+message JoinQueueRequest {
+    string client_id = 1;
+}
+
+// Response al unirse a la cola
+message JoinQueueResponse {
+    bool success = 1;
+    string session_token = 2;
+    int32 queue_position = 3;
+    int32 estimated_wait_seconds = 4;
+    string message = 5;
+}
+
+// Request para verificar estado en cola
+message QueueStatusRequest {
+    string session_token = 1;
+}
+
+// Response del estado en cola
+message QueueStatusResponse {
+    bool authorized = 1;
+    bool in_queue = 2;
+    int32 queue_position = 3;
+    int32 estimated_wait_seconds = 4;
+    string message = 5;
+}
+
 // Request para chunk específico
 message ChunkRequest {
     int32 chunk_id = 1;
+    string session_token = 2;  // Token de autorización
 }
 
 // Response con chunk de datos

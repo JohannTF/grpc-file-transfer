@@ -99,7 +99,7 @@ class ChunkController:
         
         self.precomputed = True
         elapsed = time.time() - start_time
-        print(f"[STREAMING-INIT] Metadata ready in {elapsed:.2f}s (no memory usage)")
+        print(f"[STREAMING-INIT] Metadata ready in {elapsed:.2f}s")
         
         return self.file_info
     
