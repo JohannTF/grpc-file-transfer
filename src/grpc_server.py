@@ -116,6 +116,44 @@ class FileTransferService(file_transfer_pb2_grpc.FileTransferServiceServicer):
             message=result["message"]
         )
     
+    async def GetServerStats(self, request, context):
+        """Obtiene estadísticas del servidor para ajuste dinámico de concurrencia."""
+        session_token = request.session_token
+        
+        if not session_token:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("Session token is required")
+            return file_transfer_pb2.ServerStatsResponse(
+                success=False,
+                error_message="Session token is required"
+            )
+        
+        # Verificar que el cliente esté autorizado
+        is_authorized = await self.queue_manager.is_authorized(session_token)
+        
+        if not is_authorized:
+            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+            context.set_details("Not authorized to access server stats")
+            return file_transfer_pb2.ServerStatsResponse(
+                success=False,
+                error_message="Not authorized to access server stats"
+            )
+        
+        # Obtener estadísticas del queue manager
+        stats = await self.queue_manager.get_stats()
+        
+        # Calcular porcentaje de carga del servidor
+        server_load = (stats["active_clients"] / stats["max_capacity"]) * 100
+        
+        return file_transfer_pb2.ServerStatsResponse(
+            success=True,
+            active_clients=stats["active_clients"],
+            total_capacity=stats["max_capacity"],
+            waiting_clients=stats["waiting_clients"],
+            server_load_percentage=server_load,
+            error_message=""
+        )
+    
     async def GetChunk(self, request, context):
         """Obtiene chunk específico - solo para clientes autorizados."""
         chunk_id = request.chunk_id

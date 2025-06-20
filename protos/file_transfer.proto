@@ -13,6 +13,9 @@ service FileTransferService {
     // Verificar estado en la cola
     rpc CheckQueueStatus(QueueStatusRequest) returns (QueueStatusResponse);
     
+    // Obtener estadísticas del servidor para ajuste dinámico de concurrencia
+    rpc GetServerStats(ServerStatsRequest) returns (ServerStatsResponse);
+    
     // Solicitar chunk específico por ID (solo para clientes autorizados)
     rpc GetChunk(ChunkRequest) returns (ChunkResponse);
 }
@@ -75,4 +78,19 @@ message ChunkResponse {
     bool is_last = 5;
     bool success = 6;
     string error_message = 7;
+}
+
+// Request para estadísticas del servidor
+message ServerStatsRequest {
+    string session_token = 1;  // Token de autorización
+}
+
+// Response con estadísticas del servidor
+message ServerStatsResponse {
+    bool success = 1;
+    int32 active_clients = 2;
+    int32 total_capacity = 3;
+    int32 waiting_clients = 4;
+    double server_load_percentage = 5;
+    string error_message = 6;
 }
