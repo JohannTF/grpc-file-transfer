@@ -48,29 +48,34 @@ check_error() {
 cd "$PROJECT_DIR"
 check_error "No se pudo acceder al directorio del proyecto"
 
+echo -e "${YELLOW}Configurando entorno...${NC}"
+
 # Verificar/instalar Python 3 y pip
 if ! command -v python3 &> /dev/null; then
     echo -e "${YELLOW}Instalando Python 3...${NC}"
-    sudo apt update > /dev/null 2>&1
-    sudo apt install -y python3 python3-pip > /dev/null 2>&1
+    sudo apt-get update > /dev/null 2>&1
+    sudo apt-get install -y python3 python3-pip > /dev/null 2>&1
     check_error "No se pudo instalar Python 3"
 fi
 
 if ! command -v pip3 &> /dev/null; then
-    sudo apt install -y python3-pip > /dev/null 2>&1
+    sudo apt-get install -y python3-pip > /dev/null 2>&1
     check_error "No se pudo instalar pip"
 fi
 
 # Instalar dependencias
+echo -e "${YELLOW}Descargando dependencias...${NC}"
 pip3 install --upgrade pip > /dev/null 2>&1
 pip3 install -r requirements.txt > /dev/null 2>&1
 check_error "Error instalando dependencias"
 
 # Crear estructura y generar código gRPC si es necesario
+echo -e "${YELLOW}Preparando estructura...${NC}"
 mkdir -p data src/generated
 touch src/generated/__init__.py
 
 if [ ! -f "src/generated/file_transfer_pb2.py" ]; then
+    echo -e "${YELLOW}Generando código gRPC...${NC}"
     python3 -m grpc_tools.protoc \
         --proto_path=protos \
         --python_out=src/generated \
@@ -80,6 +85,7 @@ if [ ! -f "src/generated/file_transfer_pb2.py" ]; then
 fi
 
 # Verificar conectividad con el servidor
+echo -e "${YELLOW}Verificando servidor...${NC}"
 if command -v nc &> /dev/null; then
     nc -z "$SERVER_HOST" "$SERVER_PORT" 2>/dev/null
     if [ $? -ne 0 ]; then

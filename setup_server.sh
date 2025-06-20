@@ -51,6 +51,8 @@ if [ ! -f "$FILE_TO_SHARE" ]; then
     exit 1
 fi
 
+echo -e "${YELLOW}Configurando entorno...${NC}"
+
 # Cambiar al directorio del proyecto
 cd "$PROJECT_DIR"
 check_error "No se pudo acceder al directorio del proyecto"
@@ -58,22 +60,24 @@ check_error "No se pudo acceder al directorio del proyecto"
 # Verificar/instalar Python 3 y pip
 if ! command -v python3 &> /dev/null; then
     echo -e "${YELLOW}Instalando Python 3...${NC}"
-    sudo apt update > /dev/null 2>&1
-    sudo apt install -y python3 python3-pip > /dev/null 2>&1
+    sudo apt-get update > /dev/null 2>&1
+    sudo apt-get install -y python3 python3-pip > /dev/null 2>&1
     check_error "No se pudo instalar Python 3"
 fi
 
 if ! command -v pip3 &> /dev/null; then
-    sudo apt install -y python3-pip > /dev/null 2>&1
+    sudo apt-get install -y python3-pip > /dev/null 2>&1
     check_error "No se pudo instalar pip"
 fi
 
 # Instalar dependencias
+echo -e "${YELLOW}Descargando dependencias...${NC}"
 pip3 install --upgrade pip > /dev/null 2>&1
 pip3 install -r requirements.txt > /dev/null 2>&1
 check_error "Error instalando dependencias"
 
 # Crear estructura y generar código gRPC
+echo -e "${YELLOW}Generando código gRPC...${NC}"
 mkdir -p data src/generated
 touch src/generated/__init__.py
 python3 -m grpc_tools.protoc \
