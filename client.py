@@ -42,9 +42,10 @@ except ImportError as e:
 class Client:
     """Cliente optimizado con sistema de cola."""
     
-    def __init__(self, client_id: str = None, concurrent_chunks: int = 3):
+    def __init__(self, client_id: str = None, max_concurrent_chunks: int = 20):
         self.client_id = client_id or f"client_{int(time.time())}"
-        self.concurrent_chunks = concurrent_chunks
+        self.max_concurrent_chunks = max_concurrent_chunks
+        self.concurrent_chunks = 1  # Empezar con concurrencia mínima
         self.channel = None
         self.stub = None
         self.session_token = None
@@ -63,6 +64,11 @@ class Client:
         
         # Control de estado
         self.download_active = False
+        
+        # Variables para concurrencia dinámica
+        self.last_stats_check = 0
+        self.stats_check_interval = 10  # Verificar cada 10 segundos
+        self.concurrency_adjustment_enabled = True
     
     async def connect(self, host: str, port: int):
         """Conecta al servidor."""
@@ -168,6 +174,69 @@ class Client:
             logger.error(f"Failed to get file info: {e.details()}")
             return None
     
+    async def get_server_stats(self):
+        """Obtiene estadísticas del servidor para ajuste dinámico."""
+        try:
+            request = file_transfer_pb2.ServerStatsRequest(session_token=self.session_token)
+            response = await self.stub.GetServerStats(request)
+            
+            if response.success:                return {
+                    'active_clients': response.active_clients,
+                    'total_capacity': response.total_capacity,
+                    'waiting_clients': response.waiting_clients,
+                    'server_load_percentage': response.server_load_percentage
+                }
+            else:
+                logger.warning(f"Failed to get server stats: {response.error_message}")
+                return None
+                
+        except grpc.RpcError as e:
+            logger.warning(f"Failed to get server stats: {e.details()}")
+            return None
+    
+    def calculate_optimal_concurrency(self, server_stats):
+        """Calcula la concurrencia óptima basada en las estadísticas del servidor."""
+        if not server_stats:
+            return 1  # Concurrencia mínima por defecto
+        
+        active_clients = server_stats['active_clients']
+        total_capacity = server_stats['total_capacity']
+        
+        # Si solo hay un cliente activo, usar concurrencia máxima
+        if active_clients == 1:
+            optimal_concurrency = self.max_concurrent_chunks
+        else:
+            # Distribuir equitativamente el ancho de banda entre clientes activos
+            # Cada cliente puede usar: max_concurrency / active_clients
+            optimal_concurrency = max(1, self.max_concurrent_chunks // active_clients)
+        
+        # Aplicar límite máximo
+        optimal_concurrency = min(self.max_concurrent_chunks, optimal_concurrency)
+        
+        return optimal_concurrency
+    
+    async def adjust_concurrency_if_needed(self):
+        """Ajusta la concurrencia si es necesario basándose en las estadísticas del servidor."""
+        current_time = time.time()
+        
+        # Solo verificar cada N segundos
+        if current_time - self.last_stats_check < self.stats_check_interval:
+            return
+        
+        self.last_stats_check = current_time
+        if not self.concurrency_adjustment_enabled:
+            return
+        
+        server_stats = await self.get_server_stats()
+        if server_stats:
+            new_concurrency = self.calculate_optimal_concurrency(server_stats)
+            
+            if new_concurrency != self.concurrent_chunks:
+                old_concurrency = self.concurrent_chunks
+                self.concurrent_chunks = new_concurrency
+                logger.info(f"Concurrency adjusted: {old_concurrency} -> {new_concurrency} "
+                           f"(Active clients: {server_stats['active_clients']})")
+    
     async def download_chunk(self, chunk_id: int, max_retries: int = 2):
         """Descarga un chunk específico."""
         for attempt in range(max_retries + 1):
@@ -215,12 +284,16 @@ class Client:
             if not authorized:
                 return False
         
+        # Ajustar concurrencia inicial basándose en estadísticas del servidor
+        await self.adjust_concurrency_if_needed()
+        
         # Comenzar descarga
         self.download_start_time = time.time()
-        logger.info("Starting download...")
+        logger.info(f"Starting download...")
         
         # Iniciar monitor de progreso
         progress_task = asyncio.create_task(self._progress_monitor())
+        concurrency_task = asyncio.create_task(self._concurrency_monitor())
         
         try:
             # Crear archivo de salida
@@ -230,22 +303,51 @@ class Client:
                 output_file.write(b'\0')
                 output_file.seek(0)
                 
-                # Crear semáforo para controlar concurrencia
-                semaphore = asyncio.Semaphore(self.concurrent_chunks)
+                # Usar un pool de chunks pendientes para descarga
+                pending_chunks = list(range(file_info['total_chunks']))
+                active_downloads = {}  # chunk_id -> task
+                completed_chunks = set()
                 
-                # Crear tasks para descargar chunks
-                tasks = []
-                for chunk_id in range(file_info['total_chunks']):
-                    task = asyncio.create_task(
-                        self._download_chunk_with_semaphore(semaphore, chunk_id, output_file)
-                    )
-                    tasks.append(task)
-                
-                # Esperar a que todos los chunks se descarguen
-                await asyncio.gather(*tasks, return_exceptions=True)
+                # Bucle principal de descarga con concurrencia dinámica
+                while pending_chunks or active_downloads:
+                    # Ajustar número de descargas activas según concurrencia actual
+                    while len(active_downloads) < self.concurrent_chunks and pending_chunks:
+                        chunk_id = pending_chunks.pop(0)
+                        task = asyncio.create_task(self._download_single_chunk(chunk_id))
+                        active_downloads[chunk_id] = task
+                    
+                    # Esperar a que se complete al menos una descarga
+                    if active_downloads:
+                        done_tasks = []
+                        for chunk_id, task in list(active_downloads.items()):
+                            if task.done():
+                                done_tasks.append((chunk_id, task))
+                        
+                        if not done_tasks:
+                            # Si no hay tareas completadas, esperar un poco
+                            await asyncio.sleep(0.1)
+                            continue
+                        
+                        # Procesar tareas completadas
+                        for chunk_id, task in done_tasks:
+                            del active_downloads[chunk_id]
+                            try:
+                                chunk_response = await task
+                                if chunk_response:
+                                    # Escribir chunk en la posición correcta
+                                    output_file.seek(chunk_response.offset)
+                                    output_file.write(chunk_response.data)
+                                    completed_chunks.add(chunk_id)
+                                else:
+                                    # Reintroducir chunk fallido en la cola
+                                    pending_chunks.append(chunk_id)
+                            except Exception as e:
+                                logger.warning(f"Chunk {chunk_id} failed: {e}")
+                                pending_chunks.append(chunk_id)
             
             self.download_end_time = time.time()
             progress_task.cancel()
+            concurrency_task.cancel()
             
             # Verificar si se descargaron todos los chunks
             if self.failed_chunks > 0:
@@ -258,8 +360,24 @@ class Client:
             
         except Exception as e:
             progress_task.cancel()
+            concurrency_task.cancel()
             logger.error(f"Download failed: {e}")
             return False
+    
+    async def _download_single_chunk(self, chunk_id: int):
+        """Descarga un chunk específico sin semáforo."""
+        return await self.download_chunk(chunk_id)
+    
+    async def _concurrency_monitor(self):
+        """Monitorea y ajusta la concurrencia durante la descarga."""
+        while self.download_active:
+            try:
+                await asyncio.sleep(self.stats_check_interval)
+                await self.adjust_concurrency_if_needed()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Concurrency monitor error: {e}")
     
     async def _download_chunk_with_semaphore(self, semaphore, chunk_id, output_file):
         """Descarga un chunk con control de concurrencia."""
@@ -282,7 +400,8 @@ class Client:
                     progress = (self.chunks_downloaded / self.total_chunks) * 100
                     speed_mbps = (self.bytes_downloaded / (1024 * 1024)) / max(1, time.time() - self.download_start_time)
                     
-                    logger.info(f"Progress: {progress:.1f}% ({self.chunks_downloaded}/{self.total_chunks} chunks, {speed_mbps:.1f} MB/s)")
+                    logger.info(f"Progress: {progress:.1f}% ({self.chunks_downloaded}/{self.total_chunks} chunks, "
+                               f"{speed_mbps:.1f} MB/s)")
                     
             except asyncio.CancelledError:
                 break
@@ -316,16 +435,16 @@ class Client:
 
 async def main():
     """Función principal del cliente."""
-    parser = argparse.ArgumentParser(description="Queue-based File Transfer Client")
+    parser = argparse.ArgumentParser(description="File Transfer Client")
     parser.add_argument("--host", default="localhost", help="Server host")
     parser.add_argument("--port", type=int, default=50051, help="Server port")
     parser.add_argument("--output", required=True, help="Output file")
     parser.add_argument("--client-id", help="Client ID")
-    parser.add_argument("--concurrent", type=int, default=3, help="Concurrent chunks (default: 3)")
+    parser.add_argument("--max-concurrent", type=int, default=20, help="Maximum concurrent chunks (default: 20)")
     
     args = parser.parse_args()
     
-    client = Client(args.client_id, args.concurrent)
+    client = Client(args.client_id, args.max_concurrent)
     
     try:
         await client.connect(args.host, args.port)
