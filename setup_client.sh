@@ -18,7 +18,7 @@ OUTPUT_FILE="archivo_descargado.mp4"  # Cambiar la extensión según el archivo 
 CLIENT_ID=""  # Dejar vacío para auto-generar
 
 # Concurrencia máxima (chunks simultáneos)
-MAX_CONCURRENT="100"
+MAX_CONCURRENT="20"
 
 # Directorio del proyecto (si es diferente al actual)
 PROJECT_DIR="$(pwd)"
