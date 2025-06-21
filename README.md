@@ -1,4 +1,4 @@
-# RCP: Transferencia de Archivos
+# RPC: Transferencia de Archivos
 
 Sistema de transferencia de archivos gRPC.
 
